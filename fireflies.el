@@ -17,6 +17,52 @@ The hook functions are called with the transcript data as argument.")
   :type 'string
   :group 'fireflies)
 
+(defcustom fireflies-cache-directory (expand-file-name ".fireflies" user-emacs-directory)
+  "Directory for caching fireflies transcripts"
+  :type 'directory
+  :group 'fireflies)
+
+(defun fireflies-ensure-cache-directory ()
+  "Ensure the cache directory exists"
+  (unless (file-exists-p fireflies-cache-directory)
+    (make-directory fireflies-cache-directory t)))
+
+(defun fireflies-cache-file ()
+  (expand-file-name "transcripts.el" fireflies-cache-directory))
+
+(defun fireflies-cache-transcripts (transcripts)
+  (fireflies-ensure-cache-directory)
+  (with-temp-file (fireflies-cache-file)
+    (prin1 transcripts (current-buffer))))
+
+(defun fireflies-cache-transcript (transcript id)
+  (fireflies-ensure-cache-directory)
+  (with-temp-file (expand-file-name id fireflies-cache-directory)
+    (prin1 transcript (current-buffer))))
+
+
+(defun fireflies-cache-load-transcripts ()
+  (let ((cache-file (fireflies-cache-file)))
+    (when (file-exists-p cache-file)
+      (with-temp-buffer
+	(insert-file-contents cache-file)
+	(read (current-buffer))))))
+
+(defun fireflies-cache-load-transcript (transcript-id)
+  (let ((cache-file (expand-file-name transcript-id fireflies-cache-directory)))
+    (when (file-exists-p cache-file)
+      (with-temp-buffer
+	(insert-file-contents cache-file)
+	(read (current-buffer))))))
+
+(defun fireflies ()
+  (interactive)
+  (let ((cached-transcripts (fireflies-cache-load-transcripts)))
+    (if cached-transcripts (fireflies-list-transcripts cached-transcripts)
+      (fireflies-get-transcripts))))
+
+
+
 (defvar fireflies-transcript-list nil
   "List of transcript data from Fireflies.")
 
@@ -167,6 +213,11 @@ If CALLBACK-FN is provided, call it with the result data."
     ;; Run hooks with transcript data
     (run-hook-with-args 'fireflies-after-transcript-load-hook transcript)))
 
+
+(defun fireflies-transcript (transcript-id)
+  (let ((cached-transcript (fireflies-cache-load-transcript transcript-id)))
+    (if cached-transcript (fireflies-display-transcript cached-transcript) (fireflies-get-transcript transcript-id))))
+
 (defun fireflies-get-transcript (transcript-id)
   "Get a specific transcript by TRANSCRIPT-ID."
   (fireflies-graphql-query
@@ -185,6 +236,7 @@ If CALLBACK-FN is provided, call it with the result data."
    `((id . ,transcript-id))
    (lambda (result)
      (when-let ((transcript (alist-get 'transcript result)))
+       (fireflies-cache-transcript transcript transcript-id)
        (fireflies-display-transcript transcript)))))
 
 (defvar fireflies-transcripts-mode-map
@@ -209,7 +261,7 @@ If CALLBACK-FN is provided, call it with the result data."
   (interactive)
   (let* ((id (tabulated-list-get-id)))
     (when id
-      (fireflies-get-transcript id))))
+      (fireflies-transcript id))))
 
 (defun fireflies-list-transcripts (transcripts)
   "Display TRANSCRIPTS in a tabulated list."
@@ -230,6 +282,7 @@ If CALLBACK-FN is provided, call it with the result data."
 (defun fireflies-get-transcripts (&optional limit)
   "Get recent transcripts with optional LIMIT."
   (interactive "P")
+  (message "loading transcripts from fireflies")
   (let ((limit-val (or limit 50)))
     (fireflies-graphql-query
      "query GetTranscripts($limit: Int) {
@@ -242,6 +295,7 @@ If CALLBACK-FN is provided, call it with the result data."
      `((limit . ,limit-val))
      (lambda (result)
        (when-let ((transcripts (alist-get 'transcripts result)))
+	 (fireflies-cache-transcripts transcripts)
          (fireflies-list-transcripts transcripts))))))
 
 (provide 'fireflies)
