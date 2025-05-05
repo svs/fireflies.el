@@ -4,9 +4,14 @@
 (require 'auth-source)
 
 ;; Hooks for integration with other packages
+
+(defvar fireflies-anon-mode nil)
 (defvar fireflies-after-transcript-load-hook nil
   "Hook run after a transcript is loaded and displayed.
 The hook functions are called with the transcript data as argument.")
+
+(defvar fireflies-after-transcript-display-hook nil
+  "Hook runs after transcripts have been displayed so other integrations can add context")
 
 (defgroup fireflies nil
   "Fireflies GraphQL API client."
@@ -43,7 +48,9 @@ The hook functions are called with the transcript data as argument.")
 
 (defun fireflies-cache-load-transcripts ()
   (let ((cache-file (fireflies-cache-file)))
-    (when (file-exists-p cache-file)
+    (when
+
+	(file-exists-p cache-file)
       (with-temp-buffer
 	(insert-file-contents cache-file)
 	(read (current-buffer))))))
@@ -272,12 +279,14 @@ If CALLBACK-FN is provided, call it with the result data."
       (setq tabulated-list-entries
             (mapcar (lambda (transcript)
                       (let ((id (alist-get 'id transcript))
-                            (title (alist-get 'title transcript))
+                            (title (if fireflies-anon-mode "**" (alist-get 'title transcript)))
+				    
                             (date (fireflies-format-date (alist-get 'date transcript))))
                         (list id (vector date title id))))
                     transcripts))
       (tabulated-list-print t)
-      (switch-to-buffer buffer))))
+      (switch-to-buffer buffer)
+      (run-hook-with-args 'fireflies-after-transcripts-display-hook))))
 
 (defun fireflies-get-transcripts (&optional limit)
   "Get recent transcripts with optional LIMIT."

@@ -78,8 +78,8 @@
          (title (alist-get 'title transcript))
          (date (alist-get 'date transcript))
          (context-intro (format "Transcript from meeting: '%s' on %s\n\n" 
-                               (or title "Untitled") 
-                               (fireflies-format-date date)))
+				(or title "Untitled") 
+				(fireflies-format-date date)))
          (result context-intro))
     
     ;; Check for sentences in the transcript
@@ -99,7 +99,7 @@
             (setq i (1+ i))))
       ;; If no sentences found, try to extract text from the buffer
       (when-let* ((buffer-name (format "*Fireflies - Transcript: %s*" 
-                                     (or title "Untitled")))
+                                       (or title "Untitled")))
                   (buffer (get-buffer buffer-name)))
         (with-current-buffer buffer
           (save-excursion
@@ -118,11 +118,13 @@
     (message "Extracted transcript text length: %d characters" (length result))
     result))
 
+
 (defun fireflies-org-create-or-update-todo-file (transcript todo-text)
   "Create or update TODO file for TRANSCRIPT with TODO-TEXT."
   (let ((file-path (fireflies-org--get-todo-file-path transcript))
         (title (or (alist-get 'title transcript) "Untitled Meeting"))
         (date (fireflies-format-date (alist-get 'date transcript)))
+        (id (fireflies-format-date (alist-get 'id transcript)))
         (cal-id (alist-get 'cal_id transcript)))
     
     ;; Create new file or update existing
@@ -132,6 +134,8 @@
           ;; New file - add headers
           (insert (format "#+TITLE: %s\n" title))
           (insert (format "#+DATE: %s\n" date))
+	  (insert (format "#+ID: %s\n" id))
+	  (message id)
           (when cal-id
             (insert (format "#+PROPERTY: GCAL_ID %s\n" cal-id)))
           (insert "\n* Meeting TODOs\n"))
@@ -156,7 +160,7 @@
     ;; If called interactively without transcript, try to get from buffer-local variable
     (when (and (not transcript-to-use) (called-interactively-p 'any))
       (setq transcript-to-use (when (boundp 'fireflies-current-transcript) 
-                               fireflies-current-transcript)))
+				fireflies-current-transcript)))
     
     ;; Handle case when still no transcript
     (unless transcript-to-use
@@ -167,7 +171,7 @@
       
       ;; Save transcript content to debug file for inspection
       (let ((debug-file (expand-file-name "fireflies-transcript-debug.txt" 
-                                         fireflies-org-debug-directory)))
+                                          fireflies-org-debug-directory)))
         ;; Ensure debug directory exists
         (unless (file-exists-p fireflies-org-debug-directory)
           (make-directory fireflies-org-debug-directory t))
@@ -179,20 +183,20 @@
           (insert "INSTRUCTIONS SENT TO GPT:\n\n")
           (insert fireflies-org-todo-prompt))
         (message "Saved transcript content and instructions for debugging to %s (length: %d chars)"
-                debug-file (length transcript-text)))
+                 debug-file (length transcript-text)))
       
       (if (not (fboundp 'gptel-request))
           (message "GPTel not available. Please install it to extract TODOs")
         (message "Generating TODOs...")
         
         (gptel-request
-         (concat transcript-text "\n\n" fireflies-org-todo-prompt)
-         :callback
-         (lambda (response info)
-           (when response
-             (let ((file-path (fireflies-org-create-or-update-todo-file transcript-to-use response)))
-               (message "TODOs saved to %s" file-path)
-               (find-file file-path)))))))))
+            (concat transcript-text "\n\n" fireflies-org-todo-prompt)
+          :callback
+          (lambda (response info)
+            (when response
+              (let ((file-path (fireflies-org-create-or-update-todo-file transcript-to-use response)))
+		(message "TODOs saved to %s" file-path)
+		(find-file file-path)))))))))
 
 ;;;###autoload
 (defun fireflies-org-setup ()
@@ -202,16 +206,62 @@
   (fireflies-org--ensure-todos-directory)
   (remove-hook 'fireflies-after-transcript-load-hook #'fireflies-org-add-todo-button)
   (add-hook 'fireflies-after-transcript-load-hook #'fireflies-org-add-todo-button)
+  (add-hook 'fireflies-after-transcripts-display-hook #'fireflies-org-add-context)
   (message "Fireflies org integration enabled"))
+
+
+(defun fireflies-org-add-context ()
+  "Highlight transcripts that already have TODO files."
+  (message "Adding context to transcript list")
+  (when (eq major-mode 'fireflies-transcripts-mode)
+    ;; Ensure the directory exists before proceeding
+    (unless (file-exists-p fireflies-org-todos-directory)
+      (message "Todos directory does not exist: %s" fireflies-org-todos-directory)
+      (fireflies-org--ensure-todos-directory))
+    
+    ;; Use absolute path explicitly
+    (let* ((todos-dir (expand-file-name fireflies-org-todos-directory))
+           (grep-command (format "cd %s && grep -l \"^#+ID: \" *.org" 
+                                 (shell-quote-argument todos-dir)))
+           (inhibit-read-only t)
+           todos-ids)
+      
+      (message "Running grep command: %s" grep-command)
+      (let ((grep-result (shell-command-to-string grep-command)))
+        (message "Grep result: %s" grep-result)
+        
+        ;; Now get the IDs from matching files
+        (dolist (file (split-string grep-result "\n" t))
+          (let ((full-path (expand-file-name file todos-dir)))
+            (with-temp-buffer
+              (insert-file-contents full-path)
+              (goto-char (point-min))
+              (when (re-search-forward "^\\#\\+ID: \\([^\n]+\\)" nil t)
+                (let ((id (string-trim (match-string 1))))
+                  (push id todos-ids))))))
+        
+        (message "Found %d IDs in todos directory: %s" (length todos-ids) todos-ids)
+        
+        ;; Now highlight matching rows
+        (save-excursion
+          (goto-char (point-min))
+          (while (not (eobp))
+            (let ((id (tabulated-list-get-id)))
+              (when (and id (member id todos-ids))
+                (let ((start (line-beginning-position))
+                      (end (1+ (line-end-position))))
+                  (put-text-property start end 'face '(:foreground "dark green")))))
+            (forward-line 1)))))))
+
 
 ;;;###autoload
 (defun fireflies-org-add-todo-button (transcript)
   "Add a button to generate TODOs for the displayed TRANSCRIPT."
   (message "Adding TODO button for transcript")
   (when (and transcript (get-buffer (format "*Fireflies - Transcript: %s*" 
-                                           (or (alist-get 'title transcript) "Untitled"))))
+                                            (or (alist-get 'title transcript) "Untitled"))))
     (with-current-buffer (format "*Fireflies - Transcript: %s*" 
-                                (or (alist-get 'title transcript) "Untitled"))
+                                 (or (alist-get 'title transcript) "Untitled"))
       (let ((inhibit-read-only t))
         (save-excursion
           ;; Position at the start of the buffer
@@ -221,9 +271,9 @@
           (insert "\n")
           ;; Store transcript data in a button property to avoid closure issues
           (let ((btn (insert-text-button "[Generate TODOs]"
-                             'transcript transcript
-                             'follow-link t
-                             'help-echo "Generate TODOs from this transcript")))
+					 'transcript transcript
+					 'follow-link t
+					 'help-echo "Generate TODOs from this transcript")))
             ;; Define the action after the button is created
             (button-put btn 'action (lambda (button)
                                       (fireflies-org-generate-todos 
