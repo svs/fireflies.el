@@ -43,7 +43,11 @@
   - invoice/contract follow up
 - Everything else (we don't need to show this).
 
+Follow this format, suitable for an org-agenda file.
+
 * TODO [Assignee] Some task
+
+Below the todos write a short summary of the conversation.
 "
   "Prompt for GPT to extract TODOs from transcript."
   :type 'string
@@ -196,7 +200,9 @@
             (when response
               (let ((file-path (fireflies-org-create-or-update-todo-file transcript-to-use response)))
 		(message "TODOs saved to %s" file-path)
-		(find-file file-path)))))))))
+		(find-file file-path)
+		(visual-line-mode)
+		(fireflies-org-add-context)))))))))
 
 ;;;###autoload
 (defun fireflies-org-setup ()
@@ -212,6 +218,7 @@
 
 (defun fireflies-org-add-context ()
   "Highlight transcripts that already have TODO files."
+  (interactive)
   (message "Adding context to transcript list")
   (when (eq major-mode 'fireflies-transcripts-mode)
     ;; Ensure the directory exists before proceeding
@@ -243,15 +250,16 @@
         (message "Found %d IDs in todos directory: %s" (length todos-ids) todos-ids)
         
         ;; Now highlight matching rows
-        (save-excursion
-          (goto-char (point-min))
-          (while (not (eobp))
-            (let ((id (tabulated-list-get-id)))
-              (when (and id (member id todos-ids))
-                (let ((start (line-beginning-position))
-                      (end (1+ (line-end-position))))
-                  (put-text-property start end 'face '(:foreground "dark green")))))
-            (forward-line 1)))))))
+	(with-current-buffer "*Fireflies Transcripts*"
+          (save-excursion
+            (goto-char (point-min))
+            (while (not (eobp))
+              (let ((id (tabulated-list-get-id)))
+		(when (and id (member id todos-ids))
+                  (let ((start (line-beginning-position))
+			(end (1+ (line-end-position))))
+                    (put-text-property start end 'face '(:foreground "dark green")))))
+              (forward-line 1))))))))
 
 
 ;;;###autoload
