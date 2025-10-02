@@ -62,6 +62,16 @@ The hook functions are called with the transcript data as argument.")
 	(insert-file-contents cache-file)
 	(read (current-buffer))))))
 
+(defun fireflies-clear-cache ()
+  "Clear all cached Fireflies transcripts."
+  (interactive)
+  (when (file-exists-p fireflies-cache-directory)
+    (dolist (file (directory-files fireflies-cache-directory t "^[^.].*"))
+      (delete-file file))
+    (message "Fireflies cache cleared"))
+  (unless (file-exists-p fireflies-cache-directory)
+    (message "Fireflies cache directory does not exist")))
+
 (defun fireflies ()
   (interactive)
   (let ((cached-transcripts (fireflies-cache-load-transcripts)))
@@ -108,6 +118,7 @@ The hook functions are called with the transcript data as argument.")
 (defun fireflies-graphql-query (query variables &optional callback-fn)
   "Send QUERY with VARIABLES to Fireflies GraphQL API.
 If CALLBACK-FN is provided, call it with the result data."
+  (message "starting graphql query")
   (let ((api-token (fireflies-get-api-token)))
     (unless api-token
       (user-error "No Fireflies API token found in auth-source"))
@@ -120,26 +131,26 @@ If CALLBACK-FN is provided, call it with the result data."
      :data (json-encode `((query . ,query)
                           (variables . ,variables)))
      :parser 'json-read
-     :success (cl-function
-               (lambda (&key data &allow-other-keys)
+      :success (cl-function
+                (lambda (&key data &allow-other-keys)
                  (let ((result (assoc-default 'data data)))
-                   (if callback-fn
-                       (funcall callback-fn result)
-                     (fireflies-display-result result)))))
-     :error (cl-function
-             (lambda (&key error-thrown response data &allow-other-keys)
+                    (if callback-fn
+                        (funcall callback-fn result)
+                      ))))
+      :error (cl-function
+              (lambda (&key error-thrown response data &allow-other-keys)
                (let ((buffer (get-buffer-create (fireflies-get-buffer-name))))
-                 (with-current-buffer buffer
-                   (read-only-mode -1)
-                   (erase-buffer)
-                   (insert (propertize "Fireflies API Error\n" 'face '(:foreground "red" :weight bold)))
-                   (insert (format "Error: %s\n" error-thrown))
-                   (when response
-                     (insert (format "Status: %s\n" (request-response-status-code response))))
-                   (when data
-                     (insert (format "Response data: %s\n" (prin1-to-string data))))
-                   (read-only-mode 1))
-                 (display-buffer buffer)))))))
+                  (with-current-buffer buffer
+                    (read-only-mode -1)
+                    (erase-buffer)
+                    (insert (propertize "Fireflies API Error\n" 'face '(:foreground "red" :weight bold)))
+                    (insert (format "Error: %s\n" error-thrown))
+                    (when response
+                      (insert (format "Status: %s\n" (request-response-status-code response))))
+                    (when data
+                      (insert (format "Response data: %s\n" (prin1-to-string data))))
+                    (read-only-mode 1))
+                  (display-buffer buffer)))))))
 
 (defun fireflies-format-date (date)
   "Format DATE for display, handling both strings and timestamps."
@@ -221,11 +232,15 @@ If CALLBACK-FN is provided, call it with the result data."
     (run-hook-with-args 'fireflies-after-transcript-load-hook transcript)))
 
 
+(defun fireflies-view-transcript (transcript-id)
+  "View the transcript by ID, delegating display to async loader."
+  (fireflies-transcript transcript-id))
+
 (defun fireflies-transcript (transcript-id)
   (let ((cached-transcript (fireflies-cache-load-transcript transcript-id)))
-    (if cached-transcript (fireflies-display-transcript cached-transcript) (fireflies-get-transcript transcript-id))))
+    (if cached-transcript (fireflies-display-transcript cached-transcript) (fireflies-get-transcript transcript-id (lambda (t) (fireflies-display-transcript t))))))
 
-(defun fireflies-get-transcript (transcript-id)
+(defun fireflies-get-transcript (transcript-id &optional callback)
   "Get a specific transcript by TRANSCRIPT-ID."
   (fireflies-graphql-query
    "query GetTranscript($id: String!) {
@@ -244,12 +259,20 @@ If CALLBACK-FN is provided, call it with the result data."
    (lambda (result)
      (when-let ((transcript (alist-get 'transcript result)))
        (fireflies-cache-transcript transcript transcript-id)
-       (fireflies-display-transcript transcript)))))
+      ;; Minimal refresh: rebuild entries without stealing focus
+      (when (get-buffer "*Fireflies Transcripts*")
+        (fireflies-list-transcripts fireflies-transcript-list t))
+       (if callback
+	   (funcall callback transcript))
+       ))))
 
 (defvar fireflies-transcripts-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") 'fireflies-view-transcript-at-point)
     (define-key map (kbd "g") 'fireflies-get-transcripts)
+    (define-key map (kbd "t") 'fireflies-org--generate-todos (tabulated-list-get-id))
+    (define-key map (kbd "s") 'fireflies-search)
+    (define-key map (kbd "/") 'fireflies-search)
     (define-key map (kbd "q") 'quit-window)
     map)
   "Keymap for Fireflies transcripts list mode.")
@@ -263,29 +286,43 @@ If CALLBACK-FN is provided, call it with the result data."
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header))
 
+(defun fireflies-refresh-transcripts-list ()
+  "Re-render the transcripts list buffer to reflect cache highlights."
+  (let ((buf (get-buffer "*Fireflies Transcripts*")))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (derived-mode-p 'fireflies-transcripts-mode)
+          (let ((inhibit-read-only t))
+            (tabulated-list-print t)
+            (run-hook-with-args 'fireflies-after-transcripts-display-hook)))))))
+
 (defun fireflies-view-transcript-at-point ()
   "View the transcript at point."
   (interactive)
   (let* ((id (tabulated-list-get-id)))
     (when id
-      (fireflies-transcript id))))
+      (fireflies-view-transcript id))))
 
-(defun fireflies-list-transcripts (transcripts)
-  "Display TRANSCRIPTS in a tabulated list."
+(defun fireflies-list-transcripts (transcripts &optional no-switch)
+  "Display TRANSCRIPTS in a tabulated list.
+When NO-SWITCH is non-nil, do not switch to the list buffer."
   (setq fireflies-transcript-list transcripts)
   (let ((buffer (get-buffer-create "*Fireflies Transcripts*")))
     (with-current-buffer buffer
       (fireflies-transcripts-mode)
       (setq tabulated-list-entries
             (mapcar (lambda (transcript)
-                      (let ((id (alist-get 'id transcript))
-                            (title (if fireflies-anon-mode "**" (alist-get 'title transcript)))
-				    
-                            (date (fireflies-format-date (alist-get 'date transcript))))
-                        (list id (vector date title id))))
+                      (let* ((id (alist-get 'id transcript))
+                             (title (if fireflies-anon-mode "**" (alist-get 'title transcript)))
+                             (date (fireflies-format-date (alist-get 'date transcript)))
+                             (cached (file-exists-p (expand-file-name id fireflies-cache-directory)))
+                              (display-title (if cached
+                                                 (propertize title 'face 'font-lock-keyword-face)
+                                               title)))
+                        (list id (vector date display-title id))))
                     transcripts))
       (tabulated-list-print t)
-      (switch-to-buffer buffer)
+      (unless no-switch (switch-to-buffer buffer))
       (run-hook-with-args 'fireflies-after-transcripts-display-hook))))
 
 (defun fireflies-get-transcripts (&optional limit)
@@ -306,5 +343,68 @@ If CALLBACK-FN is provided, call it with the result data."
        (when-let ((transcripts (alist-get 'transcripts result)))
 	 (fireflies-cache-transcripts transcripts)
          (fireflies-list-transcripts transcripts))))))
+
+(defun fireflies-search-by-title (keyword callback &optional limit)
+  "Search transcripts by KEYWORD in titles and call CALLBACK with results."
+  (let ((limit-val (or limit 50)))
+    (fireflies-graphql-query
+     "query SearchByTitle($keyword: String!, $scope: String!, $limit: Int) {
+        transcripts(keyword: $keyword, scope: $scope, limit: $limit) {
+          id
+          title
+          date
+        }
+      }"
+     `((keyword . ,keyword) (scope . "TITLE") (limit . ,limit-val))
+     callback)))
+
+(defun fireflies-search-by-participant (email callback &optional limit)
+  "Search transcripts by participant EMAIL and call CALLBACK with results."
+  (let ((limit-val (or limit 50)))
+    (fireflies-graphql-query
+     "query SearchByParticipant($email: [String]!, $limit: Int) {
+        transcripts(attendee_emails: $email, limit: $limit) {
+          id
+          title
+          date
+        }
+      }"
+     `((email . [,email]) (limit . ,limit-val))
+     callback)))
+
+(defvar fireflies-search-results nil
+  "Cached search results for completion.")
+
+(defun fireflies-format-transcript-for-completion (transcript)
+  "Format TRANSCRIPT for use in completing-read."
+  (let ((date (fireflies-format-date (alist-get 'date transcript)))
+        (title (or (alist-get 'title transcript) "Untitled"))
+        (id (alist-get 'id transcript)))
+    (cons (format "%s - %s" date title) id)))
+
+(defun fireflies-search ()
+  "Search Fireflies transcripts with completion interface."
+  (interactive)
+  (let* ((search-type (completing-read "Search by: " '("Title" "Participant") nil t))
+         (search-term (cond
+                       ((string= search-type "Title")
+                        (read-string "Search titles for keyword: "))
+                       ((string= search-type "Participant")
+                        (read-string "Search for participant email: "))))
+         (search-fn (if (string= search-type "Title")
+                        #'fireflies-search-by-title
+                      #'fireflies-search-by-participant)))
+
+    (message "Searching transcripts...")
+    (funcall search-fn search-term
+             (lambda (result)
+               (let ((transcripts (alist-get 'transcripts result)))
+                 (if transcripts
+                     (let* ((candidates (mapcar #'fireflies-format-transcript-for-completion transcripts))
+                            (choice (completing-read "Select transcript: " candidates nil t)))
+                       (when choice
+                         (let ((transcript-id (cdr (assoc choice candidates))))
+                           (fireflies-transcript transcript-id))))
+                   (message "No transcripts found matching your search")))))))
 
 (provide 'fireflies)
