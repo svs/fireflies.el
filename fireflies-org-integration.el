@@ -181,43 +181,59 @@ Below the todos write a short summary of the conversation.
 
         ;; Extract text and generate TODOs
         (let* ((transcript-text (fireflies-org--extract-transcript-text transcript-to-use)))
-      
-      ;; Save transcript content to debug file for inspection
-      (let ((debug-file (expand-file-name "fireflies-transcript-debug.txt" 
-                                          fireflies-org-debug-directory)))
-        ;; Ensure debug directory exists
-        (unless (file-exists-p fireflies-org-debug-directory)
-          (make-directory fireflies-org-debug-directory t))
-        
-        (with-temp-file debug-file
-          (insert "TRANSCRIPT CONTENT SENT TO GPT:\n\n")
-          (insert transcript-text)
-          (insert "\n\n=====================================\n")
-          (insert "INSTRUCTIONS SENT TO GPT:\n\n")
-          (insert fireflies-org-todo-prompt))
-        (message "Saved transcript content and instructions for debugging to %s (length: %d chars)"
-                 debug-file (length transcript-text)))
-      
-      (if (not (fboundp 'gptel-request))
-          (message "GPTel not available. Please install and configure it to extract TODOs")
-        (message "Generating TODOs (chars: %d)..." (length transcript-text))
-        
-        (gptel-request
-            (concat transcript-text "\n\n" fireflies-org-todo-prompt)
-          :callback
-          (lambda (response info)
-            (if (and response (stringp response) (> (length response) 0))
-              (let ((file-path (fireflies-org-create-or-update-todo-file transcript-to-use response)))
-		(message "TODOs saved to %s" file-path)
-		(find-file file-path)
-		(visual-line-mode)
-		(fireflies-org-add-context)))
-              (message "GPTel returned no response; check API configuration and logs")))))))))
+
+          ;; Save transcript content to debug file for inspection
+          (let ((debug-file (expand-file-name "fireflies-transcript-debug.txt"
+                                              fireflies-org-debug-directory)))
+            ;; Ensure debug directory exists
+            (unless (file-exists-p fireflies-org-debug-directory)
+              (make-directory fireflies-org-debug-directory t))
+
+            (with-temp-file debug-file
+              (insert "TRANSCRIPT CONTENT SENT TO GPT:\n\n")
+              (insert transcript-text)
+              (insert "\n\n=====================================\n")
+              (insert "INSTRUCTIONS SENT TO GPT:\n\n")
+              (insert fireflies-org-todo-prompt))
+            (message "Saved transcript content and instructions for debugging to %s (length: %d chars)"
+                     debug-file (length transcript-text)))
+
+          (if (not (fboundp 'gptel-request))
+              (message "GPTel not available. Please install and configure it to extract TODOs")
+            (message "Generating TODOs (chars: %d)..." (length transcript-text))
+
+            (gptel-request
+                (concat transcript-text "\n\n" fireflies-org-todo-prompt)
+              :callback
+              (lambda (response info)
+                (if (and response (stringp response) (> (length response) 0))
+                    (let ((file-path (fireflies-org-create-or-update-todo-file transcript-to-use response)))
+                      (message "TODOs saved to %s" file-path)
+                      (find-file file-path)
+                      (visual-line-mode)
+                      (fireflies-org-add-context)
+                      ;; Refresh transcript list to show updated highlighting
+                      (when (get-buffer "*Fireflies Transcripts*")
+                        (with-current-buffer "*Fireflies Transcripts*"
+                          (tabulated-list-print t))))
+                  (message "GPTel returned no response; check API configuration and logs"))))))))))
 
 (defun fireflies-org--allow-todo-changes (orig-fun &rest args)
   "Allow TODO state changes even in read-only fireflies TODO files."
   (let ((inhibit-read-only t))
     (apply orig-fun args)))
+
+(defun fireflies-org--auto-save-after-todo ()
+  "Automatically save fireflies TODO files after changing TODO state."
+  (when (and buffer-file-name
+             (string-match-p (regexp-quote (expand-file-name fireflies-org-todos-directory))
+                           buffer-file-name))
+    (let ((inhibit-read-only t))
+      (save-buffer))
+    ;; Refresh transcript list to show updated counts
+    (when (get-buffer "*Fireflies Transcripts*")
+      (with-current-buffer "*Fireflies Transcripts*"
+        (tabulated-list-print t)))))
 
 (defun fireflies-org-toggle-edit-mode ()
   "Toggle edit mode for fireflies TODO files."
@@ -230,6 +246,26 @@ Below the todos write a short summary of the conversation.
       (read-only-mode 1)
       (message "Read-only mode enabled. Press 'e' to edit."))))
 
+(defun fireflies-org--anonymize-todo-buffer ()
+  "Apply overlays to anonymize TODO file content when anon-mode is active."
+  (when (and fireflies-anon-mode
+             buffer-file-name
+             (string-match-p (regexp-quote (expand-file-name fireflies-org-todos-directory))
+                           buffer-file-name))
+    (save-excursion
+      (goto-char (point-min))
+      ;; Blur #+TITLE line
+      (when (re-search-forward "^\\#\\+TITLE: \\(.+\\)$" nil t)
+        (let* ((start (match-beginning 1))
+               (end (match-end 1))
+               (ov (make-overlay start end)))
+          (overlay-put ov 'display "Meeting")
+          (overlay-put ov 'fireflies-anon t))))))
+
+(defun fireflies-org--clear-anon-overlays ()
+  "Remove all anonymization overlays from current buffer."
+  (remove-overlays (point-min) (point-max) 'fireflies-anon t))
+
 (defun fireflies-org--make-todo-file-readonly ()
   "Make fireflies TODO files read-only, but allow TODO state changes."
   (when (and buffer-file-name
@@ -238,6 +274,7 @@ Below the todos write a short summary of the conversation.
     (read-only-mode 1)
     (local-set-key (kbd "q") 'quit-window)
     (local-set-key (kbd "e") 'fireflies-org-toggle-edit-mode)
+    (fireflies-org--anonymize-todo-buffer)
     (message "Fireflies TODO file is read-only (e to edit, C-c C-t to change TODO states, q to quit)")))
 
 ;;;###autoload
@@ -253,6 +290,8 @@ Below the todos write a short summary of the conversation.
   (add-hook 'org-mode-hook #'fireflies-org--make-todo-file-readonly)
   ;; Advise org-todo to allow changes in read-only buffers
   (advice-add 'org-todo :around #'fireflies-org--allow-todo-changes)
+  ;; Auto-save after TODO state changes
+  (advice-add 'org-todo :after #'fireflies-org--auto-save-after-todo)
   ;; Keybindings: 't' to generate TODOs in list and transcript buffers
   (define-key fireflies-transcripts-mode-map (kbd "t") #'fireflies-org-generate-todos-at-point)
   (define-key fireflies-transcript-mode-map (kbd "t") #'fireflies-org-generate-todos-from-buffer)
@@ -278,52 +317,61 @@ Below the todos write a short summary of the conversation.
       (fireflies-org-generate-todos fireflies-current-transcript)
     (message "No transcript data in this buffer")))
 
+(defun fireflies-org-count-todos-in-file (file-path)
+  "Return (done-count . todo-count) for FILE-PATH.
+Returns cons cell with counts, or (0 . 0) if file doesn't exist."
+  (if (file-exists-p file-path)
+      (with-temp-buffer
+        (insert-file-contents file-path)
+        (org-mode)
+        (let ((todo-count 0)
+              (done-count 0))
+          (org-element-map (org-element-parse-buffer) 'headline
+            (lambda (hl)
+              (let ((todo-keyword (org-element-property :todo-keyword hl)))
+                (cond
+                 ((string= todo-keyword "TODO") (setq todo-count (1+ todo-count)))
+                 ((or (string= todo-keyword "DONE")
+                      (string= todo-keyword "CANCELLED"))
+                  (setq done-count (1+ done-count)))))))
+          (cons done-count todo-count)))
+    (cons 0 0)))
+
+(defun fireflies-org-get-todo-file-for-id (transcript-id)
+  "Get the TODO file path for TRANSCRIPT-ID if it exists, nil otherwise."
+  (let* ((todos-dir (expand-file-name fireflies-org-todos-directory))
+         (files (when (file-exists-p todos-dir)
+                  (directory-files todos-dir t "\\.org$"))))
+    (catch 'found
+      (dolist (file files)
+        ;; Skip lock files (start with .#)
+        (unless (string-match-p "/\\.#" file)
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-min))
+            (when (re-search-forward (format "^\\#\\+ID: %s$" (regexp-quote transcript-id)) nil t)
+              (throw 'found file)))))
+      nil)))
+
+(defun fireflies-org-format-todo-count (transcript-id)
+  "Return formatted TODO count string for TRANSCRIPT-ID, or empty string if no todos."
+  (if-let ((file-path (fireflies-org-get-todo-file-for-id transcript-id)))
+      (let* ((counts (fireflies-org-count-todos-in-file file-path))
+             (done-count (car counts))
+             (todo-count (cdr counts))
+             (total-count (+ done-count todo-count)))
+        (if (> total-count 0)
+            (propertize (format "[%d/%d]" done-count total-count)
+                       'face '(:foreground "dark green"))
+          ""))
+    ""))
 
 (defun fireflies-org-add-context ()
-  "Highlight transcripts that already have TODO files."
+  "Context function for TODO files - no longer needed as counts are in column."
   (interactive)
-  (message "Adding context to transcript list")
-  (when (eq major-mode 'fireflies-transcripts-mode)
-    ;; Ensure the directory exists before proceeding
-    (unless (file-exists-p fireflies-org-todos-directory)
-      (message "Todos directory does not exist: %s" fireflies-org-todos-directory)
-      (fireflies-org--ensure-todos-directory))
-    
-    ;; Use absolute path explicitly
-    (let* ((todos-dir (expand-file-name fireflies-org-todos-directory))
-           (grep-command (format "cd %s && ls *.org 2>/dev/null | xargs -I {} grep -l \"^#+ID: \" {} 2>/dev/null || true"
-                                 (shell-quote-argument todos-dir)))
-           (inhibit-read-only t)
-           todos-ids)
-
-      (message "Running grep command: %s" grep-command)
-      (let ((grep-result (shell-command-to-string grep-command)))
-        (message "Grep result: %s" grep-result)
-
-        ;; Now get the IDs from matching files (only if grep-result is not empty)
-        (when (and grep-result (not (string-empty-p (string-trim grep-result))))
-          (dolist (file (split-string grep-result "\n" t))
-            (let ((full-path (expand-file-name file todos-dir)))
-              (with-temp-buffer
-                (insert-file-contents full-path)
-                (goto-char (point-min))
-                (when (re-search-forward "^\\#\\+ID: \\([^\n]+\\)" nil t)
-                  (let ((id (string-trim (match-string 1))))
-                    (push id todos-ids))))))))
-
-      (message "Found %d IDs in todos directory: %s" (length todos-ids) todos-ids)
-
-      ;; Now highlight matching rows
-      (with-current-buffer "*Fireflies Transcripts*"
-        (save-excursion
-          (goto-char (point-min))
-          (while (not (eobp))
-            (let ((id (tabulated-list-get-id)))
-              (when (and id (member id todos-ids))
-                (let ((ov (make-overlay (line-beginning-position) (line-end-position))))
-                  (overlay-put ov 'face '(:foreground "dark green"))
-                  (overlay-put ov 'priority 100))))
-            (forward-line 1)))))))
+  ;; This function is kept for compatibility but does nothing now
+  ;; The TODO counts are displayed directly in the TODOs column
+  nil)
 
 
 ;;;###autoload

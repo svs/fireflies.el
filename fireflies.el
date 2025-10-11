@@ -5,7 +5,38 @@
 
 ;; Hooks for integration with other packages
 
-(defvar fireflies-anon-mode nil)
+(defvar fireflies-anon-mode nil
+  "When non-nil, anonymize names in transcripts and TODO files for demo/recording purposes.")
+
+(defun fireflies-toggle-demo-mode ()
+  "Toggle anonymization of names for demo/recording purposes."
+  (interactive)
+  (setq fireflies-anon-mode (not fireflies-anon-mode))
+  (message "Fireflies demo mode %s" (if fireflies-anon-mode "enabled" "disabled"))
+
+  ;; Refresh transcript list if open
+  (when (get-buffer "*Fireflies Transcripts*")
+    (with-current-buffer "*Fireflies Transcripts*"
+      (tabulated-list-print t)))
+
+  ;; Offer to refresh open transcript buffers
+  (when (y-or-n-p "Refresh open transcript buffers? ")
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (boundp 'fireflies-current-transcript)
+                   fireflies-current-transcript)
+          (fireflies-display-transcript fireflies-current-transcript)))))
+
+  ;; Update TODO file overlays
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when (and buffer-file-name
+                 (string-match-p "fireflies-todos" buffer-file-name))
+        (if fireflies-anon-mode
+            (when (fboundp 'fireflies-org--anonymize-todo-buffer)
+              (fireflies-org--anonymize-todo-buffer))
+          (when (fboundp 'fireflies-org--clear-anon-overlays)
+            (fireflies-org--clear-anon-overlays)))))))
 (defvar fireflies-after-transcript-load-hook nil
   "Hook run after a transcript is loaded and displayed.
 The hook functions are called with the transcript data as argument.")
@@ -183,29 +214,34 @@ If CALLBACK-FN is provided, call it with the result data."
 
 (defun fireflies-display-transcript (transcript)
   "Display TRANSCRIPT in a formatted buffer."
-  (let ((buffer (get-buffer-create (format "*Fireflies - Transcript: %s*" 
-                                          (or (alist-get 'title transcript) "Untitled"))))
-        (inhibit-read-only t)
-        (sentences (alist-get 'sentences transcript)))
+  (let* ((title (or (alist-get 'title transcript) "Untitled"))
+         (display-title (if fireflies-anon-mode
+                           (fireflies-anonymize-title title)
+                         title))
+         (buffer (get-buffer-create (format "*Fireflies - Transcript: %s*" display-title)))
+         (inhibit-read-only t)
+         (sentences (alist-get 'sentences transcript)))
     (with-current-buffer buffer
       ;; Store transcript data in buffer-local variable
       (setq-local fireflies-current-transcript transcript)
-      
+
       (erase-buffer)
       (when (fboundp 'org-mode)
-        (insert (format "#+TITLE: %s\n" (or (alist-get 'title transcript) "Untitled")))
+        (insert (format "#+TITLE: %s\n" display-title))
         (insert (format "#+DATE: %s\n\n" (fireflies-format-date (alist-get 'date transcript)))))
       (unless (fboundp 'org-mode)
-        (insert (format "Title: %s\n" (or (alist-get 'title transcript) "Untitled")))
+        (insert (format "Title: %s\n" display-title))
         (insert (format "Date: %s\n\n" (fireflies-format-date (alist-get 'date transcript)))))
-      
+
       ;; Add instructions for TODO generation
       (insert "Press 't' to generate TODOs from this transcript\n\n")
-      
+
       ;; Add conversation
       (insert "* Transcript\n\n")
       (if sentences
           (let ((current-speaker nil)
+                (speaker-map (make-hash-table :test 'equal))
+                (speaker-counter 0)
                 (i 0)
                 (len (length sentences)))
             (while (< i len)
@@ -215,18 +251,26 @@ If CALLBACK-FN is provided, call it with the result data."
                 (when (and text (not (string-empty-p text)))
                   (when (not (equal speaker-name current-speaker))
                     (setq current-speaker speaker-name)
-                    (insert (format "\n*%s*: " (or speaker-name "Unknown"))))
+                    (let ((display-name (if fireflies-anon-mode
+                                           (or (gethash speaker-name speaker-map)
+                                               (progn
+                                                 (setq speaker-counter (1+ speaker-counter))
+                                                 (let ((anon-name (format "Speaker %c" (+ ?A (1- speaker-counter)))))
+                                                   (puthash speaker-name anon-name speaker-map)
+                                                   anon-name)))
+                                         (or speaker-name "Unknown"))))
+                      (insert (format "\n*%s*: " display-name))))
                   (insert text " ")))
               (setq i (1+ i))))
         (insert "No transcript content available"))
-      
+
       (goto-char (point-min))
       ;; Apply the mode after inserting content
       (if (fboundp 'org-mode)
           (fireflies-transcript-mode)
         (special-mode)))
     (display-buffer buffer)
-    
+
     ;; Run hooks with transcript data
     (run-hook-with-args 'fireflies-after-transcript-load-hook transcript)))
 
@@ -279,6 +323,7 @@ If CALLBACK-FN is provided, call it with the result data."
   "Major mode for listing Fireflies transcripts."
   (setq tabulated-list-format [("Date" 12 t)
                               ("Title" 50 t)
+                              ("TODOs" 10 nil)
                               ("ID" 36 nil)])
   (setq tabulated-list-sort-key '("Date" . t)) ;; Newest first
   (setq tabulated-list-padding 2)
@@ -315,6 +360,18 @@ handled internally; callers need not care whether it came from cache or API."
     (when id
       (fireflies-view-transcript id))))
 
+(defun fireflies-anonymize-title (title)
+  "Anonymize TITLE based on keywords for demo mode."
+  (let ((lower-title (downcase title)))
+    (cond
+     ((string-match-p "candidate\\|interview\\|screening" lower-title)
+      "Candidate Interview")
+     ((string-match-p "client\\|customer" lower-title)
+      "Client Meeting")
+     ((string-match-p "important\\|urgent\\|critical\\|exec\\|leadership" lower-title)
+      "Important Meeting")
+     (t "Team Meeting"))))
+
 (defun fireflies-list-transcripts (transcripts &optional no-switch)
   "Display TRANSCRIPTS in a tabulated list.
 When NO-SWITCH is non-nil, do not switch to the list buffer."
@@ -325,13 +382,18 @@ When NO-SWITCH is non-nil, do not switch to the list buffer."
       (setq tabulated-list-entries
             (mapcar (lambda (transcript)
                       (let* ((id (alist-get 'id transcript))
-                             (title (if fireflies-anon-mode "**" (alist-get 'title transcript)))
+                             (raw-title (alist-get 'title transcript))
+                             (title (if fireflies-anon-mode
+                                       (fireflies-anonymize-title raw-title)
+                                     raw-title))
                              (date (fireflies-format-date (alist-get 'date transcript)))
                              (cached (file-exists-p (expand-file-name id fireflies-cache-directory)))
-                              (display-title (if cached
-                                                 (propertize title 'face 'font-lock-keyword-face)
-                                               title)))
-                        (list id (vector date display-title id))))
+                             (display-title (propertize title 'face (if cached 'font-lock-keyword-face '(:foreground "gray50"))))
+                             (display-date (propertize date 'face '(:foreground "gray50")))
+                             (todo-count (if (fboundp 'fireflies-org-format-todo-count)
+                                            (fireflies-org-format-todo-count id)
+                                          "")))
+                        (list id (vector display-date display-title todo-count id))))
                     transcripts))
       (tabulated-list-print t)
       (unless no-switch (switch-to-buffer buffer))
