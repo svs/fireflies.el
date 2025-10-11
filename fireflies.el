@@ -10,7 +10,7 @@
   "Hook run after a transcript is loaded and displayed.
 The hook functions are called with the transcript data as argument.")
 
-(defvar fireflies-after-transcript-display-hook nil
+(defvar fireflies-after-transcripts-display-hook nil
   "Hook runs after transcripts have been displayed so other integrations can add context")
 
 (defgroup fireflies nil
@@ -170,7 +170,6 @@ If CALLBACK-FN is provided, call it with the result data."
 (defvar fireflies-transcript-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "q") 'quit-window)
-    (define-key map (kbd "t") 'fireflies-org-generate-todos)
     map)
   "Keymap for Fireflies transcript buffers.")
 
@@ -270,7 +269,6 @@ If CALLBACK-FN is provided, call it with the result data."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") 'fireflies-view-transcript-at-point)
     (define-key map (kbd "g") 'fireflies-get-transcripts)
-    (define-key map (kbd "t") 'fireflies-org--generate-todos (tabulated-list-get-id))
     (define-key map (kbd "s") 'fireflies-search)
     (define-key map (kbd "/") 'fireflies-search)
     (define-key map (kbd "q") 'quit-window)
@@ -285,6 +283,20 @@ If CALLBACK-FN is provided, call it with the result data."
   (setq tabulated-list-sort-key '("Date" . t)) ;; Newest first
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header))
+
+(defun fireflies-with-transcript (transcript-id callback)
+  "Ensure TRANSCRIPT-ID is available, then CALLBACK with the transcript alist.
+Callback is called with one argument: the transcript alist. Caching is
+handled internally; callers need not care whether it came from cache or API."
+  (let ((cached (fireflies-cache-load-transcript transcript-id)))
+    (if cached
+        (funcall callback cached)
+      (fireflies-get-transcript
+       transcript-id
+       (lambda (transcript)
+         (funcall callback transcript))))))
+
+
 
 (defun fireflies-refresh-transcripts-list ()
   "Re-render the transcripts list buffer to reflect cache highlights."
