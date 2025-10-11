@@ -15,9 +15,7 @@
   (message "Fireflies demo mode %s" (if fireflies-anon-mode "enabled" "disabled"))
 
   ;; Refresh transcript list if open
-  (when (get-buffer "*Fireflies Transcripts*")
-    (with-current-buffer "*Fireflies Transcripts*"
-      (tabulated-list-print t)))
+  (fireflies-refresh-transcript-list-if-exists)
 
   ;; Offer to refresh open transcript buffers
   (when (y-or-n-p "Refresh open transcript buffers? ")
@@ -41,8 +39,10 @@
   "Hook run after a transcript is loaded and displayed.
 The hook functions are called with the transcript data as argument.")
 
-(defvar fireflies-after-transcripts-display-hook nil
-  "Hook runs after transcripts have been displayed so other integrations can add context")
+(defvar fireflies-before-transcripts-render-hook nil
+  "Hook run before transcripts are rendered.
+Extensions can use this to modify `tabulated-list-format' and `tabulated-list-entries'.
+Functions in this hook are called with no arguments in the transcript list buffer.")
 
 (defgroup fireflies nil
   "Fireflies GraphQL API client."
@@ -57,6 +57,12 @@ The hook functions are called with the transcript data as argument.")
   "Directory for caching fireflies transcripts"
   :type 'directory
   :group 'fireflies)
+
+(defconst fireflies-transcripts-buffer-name "*Fireflies Transcripts*"
+  "Buffer name for the transcripts list.")
+
+(defconst fireflies-transcript-buffer-name-format "*Fireflies - Transcript: %s*"
+  "Format string for transcript buffer names. %s will be replaced with the title.")
 
 (defun fireflies-ensure-cache-directory ()
   "Ensure the cache directory exists"
@@ -218,7 +224,7 @@ If CALLBACK-FN is provided, call it with the result data."
          (display-title (if fireflies-anon-mode
                            (fireflies-anonymize-title title)
                          title))
-         (buffer (get-buffer-create (format "*Fireflies - Transcript: %s*" display-title)))
+         (buffer (get-buffer-create (format fireflies-transcript-buffer-name-format display-title)))
          (inhibit-read-only t)
          (sentences (alist-get 'sentences transcript)))
     (with-current-buffer buffer
@@ -252,12 +258,10 @@ If CALLBACK-FN is provided, call it with the result data."
                   (when (not (equal speaker-name current-speaker))
                     (setq current-speaker speaker-name)
                     (let ((display-name (if fireflies-anon-mode
-                                           (or (gethash speaker-name speaker-map)
-                                               (progn
-                                                 (setq speaker-counter (1+ speaker-counter))
-                                                 (let ((anon-name (format "Speaker %c" (+ ?A (1- speaker-counter)))))
-                                                   (puthash speaker-name anon-name speaker-map)
-                                                   anon-name)))
+                                           (let ((result (fireflies--get-anonymous-speaker-name
+                                                         speaker-name speaker-map speaker-counter)))
+                                             (setq speaker-counter (cdr result))
+                                             (car result))
                                          (or speaker-name "Unknown"))))
                       (insert (format "\n*%s*: " display-name))))
                   (insert text " ")))
@@ -303,7 +307,7 @@ If CALLBACK-FN is provided, call it with the result data."
      (when-let ((transcript (alist-get 'transcript result)))
        (fireflies-cache-transcript transcript transcript-id)
       ;; Minimal refresh: rebuild entries without stealing focus
-      (when (get-buffer "*Fireflies Transcripts*")
+      (when (get-buffer fireflies-transcripts-buffer-name)
         (fireflies-list-transcripts fireflies-transcript-list t))
        (if callback
 	   (funcall callback transcript))
@@ -323,7 +327,6 @@ If CALLBACK-FN is provided, call it with the result data."
   "Major mode for listing Fireflies transcripts."
   (setq tabulated-list-format [("Date" 12 t)
                               ("Title" 50 t)
-                              ("TODOs" 10 nil)
                               ("ID" 36 nil)])
   (setq tabulated-list-sort-key '("Date" . t)) ;; Newest first
   (setq tabulated-list-padding 2)
@@ -343,15 +346,11 @@ handled internally; callers need not care whether it came from cache or API."
 
 
 
-(defun fireflies-refresh-transcripts-list ()
-  "Re-render the transcripts list buffer to reflect cache highlights."
-  (let ((buf (get-buffer "*Fireflies Transcripts*")))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (when (derived-mode-p 'fireflies-transcripts-mode)
-          (let ((inhibit-read-only t))
-            (tabulated-list-print t)
-            (run-hook-with-args 'fireflies-after-transcripts-display-hook)))))))
+(defun fireflies-refresh-transcript-list-if-exists ()
+  "Refresh the transcript list buffer if it exists."
+  (when (get-buffer fireflies-transcripts-buffer-name)
+    (with-current-buffer fireflies-transcripts-buffer-name
+      (tabulated-list-print t))))
 
 (defun fireflies-view-transcript-at-point ()
   "View the transcript at point."
@@ -372,11 +371,23 @@ handled internally; callers need not care whether it came from cache or API."
       "Important Meeting")
      (t "Team Meeting"))))
 
+(defun fireflies--get-anonymous-speaker-name (speaker-name speaker-map speaker-counter)
+  "Get or create anonymous name for SPEAKER-NAME using SPEAKER-MAP.
+SPEAKER-COUNTER is current counter value. Returns cons cell (display-name . new-counter)."
+  (let ((cached-name (gethash speaker-name speaker-map)))
+    (if cached-name
+        (cons cached-name speaker-counter)
+      ;; Create new anonymous name
+      (let* ((new-counter (1+ speaker-counter))
+             (anon-name (format "Speaker %c" (+ ?A (1- new-counter)))))
+        (puthash speaker-name anon-name speaker-map)
+        (cons anon-name new-counter)))))
+
 (defun fireflies-list-transcripts (transcripts &optional no-switch)
   "Display TRANSCRIPTS in a tabulated list.
 When NO-SWITCH is non-nil, do not switch to the list buffer."
   (setq fireflies-transcript-list transcripts)
-  (let ((buffer (get-buffer-create "*Fireflies Transcripts*")))
+  (let ((buffer (get-buffer-create fireflies-transcripts-buffer-name)))
     (with-current-buffer buffer
       (fireflies-transcripts-mode)
       (setq tabulated-list-entries
@@ -389,15 +400,13 @@ When NO-SWITCH is non-nil, do not switch to the list buffer."
                              (date (fireflies-format-date (alist-get 'date transcript)))
                              (cached (file-exists-p (expand-file-name id fireflies-cache-directory)))
                              (display-title (propertize title 'face (if cached 'font-lock-keyword-face '(:foreground "gray50"))))
-                             (display-date (propertize date 'face '(:foreground "gray50")))
-                             (todo-count (if (fboundp 'fireflies-org-format-todo-count)
-                                            (fireflies-org-format-todo-count id)
-                                          "")))
-                        (list id (vector display-date display-title todo-count id))))
+                             (display-date (propertize date 'face '(:foreground "gray50"))))
+                        (list id (vector display-date display-title id))))
                     transcripts))
+      ;; Run hook to allow extensions to modify format and entries
+      (run-hooks 'fireflies-before-transcripts-render-hook)
       (tabulated-list-print t)
-      (unless no-switch (switch-to-buffer buffer))
-      (run-hook-with-args 'fireflies-after-transcripts-display-hook))))
+      (unless no-switch (switch-to-buffer buffer)))))
 
 (defun fireflies-get-transcripts (&optional limit)
   "Get recent transcripts with optional LIMIT."
