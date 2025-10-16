@@ -180,7 +180,7 @@ If CALLBACK-FN is provided, call it with the result data."
                   (with-current-buffer buffer
                     (read-only-mode -1)
                     (erase-buffer)
-                    (insert (propertize "Fireflies API Error\n" 'face '(:foreground "red" :weight bold)))
+                    (insert (propertize "Fireflies API Error\n" 'face 'error))
                     (insert (format "Error: %s\n" error-thrown))
                     (when response
                       (insert (format "Status: %s\n" (request-response-status-code response))))
@@ -211,8 +211,7 @@ If CALLBACK-FN is provided, call it with the result data."
   "Keymap for Fireflies transcript buffers.")
 
 (define-derived-mode fireflies-transcript-mode org-mode "Fireflies Transcript"
-  "Major mode for viewing Fireflies transcripts."
-  (read-only-mode 1))
+  "Major mode for viewing Fireflies transcripts.")
 
 ;; Define buffer-local variable for transcript data
 (defvar-local fireflies-current-transcript nil
@@ -225,7 +224,6 @@ If CALLBACK-FN is provided, call it with the result data."
                            (fireflies-anonymize-title title)
                          title))
          (buffer (get-buffer-create (format fireflies-transcript-buffer-name-format display-title)))
-         (inhibit-read-only t)
          (sentences (alist-get 'sentences transcript)))
     (with-current-buffer buffer
       ;; Store transcript data in buffer-local variable
@@ -330,7 +328,8 @@ If CALLBACK-FN is provided, call it with the result data."
                               ("ID" 36 nil)])
   (setq tabulated-list-sort-key '("Date" . t)) ;; Newest first
   (setq tabulated-list-padding 2)
-  (tabulated-list-init-header))
+  (tabulated-list-init-header)
+  (hl-line-mode 1))
 
 (defun fireflies-with-transcript (transcript-id callback)
   "Ensure TRANSCRIPT-ID is available, then CALLBACK with the transcript alist.
@@ -399,9 +398,10 @@ When NO-SWITCH is non-nil, do not switch to the list buffer."
                                      raw-title))
                              (date (fireflies-format-date (alist-get 'date transcript)))
                              (cached (file-exists-p (expand-file-name id fireflies-cache-directory)))
-                             (display-title (propertize title 'face (if cached 'font-lock-keyword-face '(:foreground "gray50"))))
-                             (display-date (propertize date 'face '(:foreground "gray50"))))
-                        (list id (vector display-date display-title id))))
+                             (display-title (propertize title 'face (if cached 'font-lock-keyword-face 'shadow)))
+                             (display-date (propertize date 'face 'shadow))
+                             (display-id (propertize id 'face 'shadow)))
+                        (list id (vector display-date display-title display-id))))
                     transcripts))
       ;; Run hook to allow extensions to modify format and entries
       (run-hooks 'fireflies-before-transcripts-render-hook)
